@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@theme {
+  --color-aura-canvas: #f8f7f4;
+  --color-aura-card: #ffffff;
+  --color-aura-text: #1f2937;
+  --color-aura-muted: #6b7280;
+  --color-aura-accent: #a78bfa;
+  --color-aura-accentSoft: #ede9fe;
+  --color-aura-border: #e5e7eb;
+}
+
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at top left, #faf5ff, transparent 35%), #f8f7f4;
+  color: #1f2937;
+  min-height: 100vh;
+  font-family: var(--font-body), "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display), Georgia, serif;
+  letter-spacing: -0.015em;
+}
