@@ -1,26 +1,64 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Lightbulb, Loader2, Save, Sparkles, X } from "lucide-react";
-import { generateInsights } from "@/lib/insights";
-import { createMoodEntry, listMoodEntriesByMonth } from "@/lib/mood-entries";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CalendarDays, ChevronLeft, ChevronRight, Lightbulb, Loader2, Sparkles, X } from "lucide-react";
+import { INSIGHT_WINDOW_DAYS, generateInsights } from "@/lib/insights";
+import { createMoodEntry, listMoodEntriesBetween, listMoodEntriesByMonth } from "@/lib/mood-entries";
 import { getLocalEntryDate, getMoodOption, MoodEntry, MoodKey, MOOD_OPTIONS } from "@/lib/mood-config";
+import { normalizeLevel } from "@/lib/level-scale";
 import { canUseSupabase } from "@/lib/supabase-client";
 
 const STORAGE_KEY = "rediscover-aura:mood-entries";
+const NOTE_MAX_LENGTH = 280;
+const AUTOSAVE_MS = 1200;
 
-function MetricBar({ label, value }: { label: string; value: number }) {
+type AutosaveStatus = "idle" | "saving" | "saved" | "error";
+
+function Scale1to5({
+  label,
+  lowLabel,
+  highLabel,
+  value,
+  onChange,
+  disabled
+}: {
+  label: string;
+  lowLabel: string;
+  highLabel: string;
+  value: number;
+  onChange: (next: number) => void;
+  disabled?: boolean;
+}) {
+  const steps = [1, 2, 3, 4, 5] as const;
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
+    <div className={`space-y-2 ${disabled ? "opacity-50" : ""}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium text-aura-text">{label}</p>
-        <p className="text-sm text-aura-muted">{value}%</p>
+        <p className="text-sm tabular-nums text-aura-muted">
+          <span className="font-medium text-aura-text">{value}</span>
+          <span className="text-aura-muted"> / 5</span>
+        </p>
       </div>
-      <div className="h-2.5 w-full overflow-hidden rounded-full bg-aura-accentSoft/90">
-        <div
-          className="h-full rounded-full bg-gradient-to-r from-violet-500 to-indigo-400 transition-all duration-700 ease-out"
-          style={{ width: `${value}%` }}
-        />
+      <p className="text-xs text-aura-muted">
+        {lowLabel} → {highLabel}
+      </p>
+      <div className="flex gap-1.5" role="group" aria-label={`${label}, 1 to 5`}>
+        {steps.map((step) => (
+          <button
+            key={step}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange(step)}
+            aria-pressed={value === step}
+            className={`min-h-11 min-w-0 flex-1 rounded-lg border text-sm font-semibold tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 disabled:cursor-not-allowed ${
+              value === step
+                ? "border-violet-500 bg-violet-600 text-white"
+                : "border-aura-border bg-white text-aura-text hover:border-violet-300"
+            }`}
+          >
+            {step}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -64,29 +102,48 @@ function readLocalEntries(): MoodEntry[] {
   if (!raw) {
     return [];
   }
-  return JSON.parse(raw) as MoodEntry[];
+  const parsed = JSON.parse(raw) as MoodEntry[];
+  return parsed.map((entry) => ({
+    ...entry,
+    emotionLevel: normalizeLevel(entry.emotionLevel),
+    stressLevel: normalizeLevel(entry.stressLevel),
+    energyLevel: normalizeLevel(entry.energyLevel)
+  }));
 }
 
 function persistLocalEntries(entries: MoodEntry[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
 }
 
+function recentRangeKeys(): { start: string; end: string } {
+  const end = getLocalEntryDate(new Date());
+  const startD = new Date();
+  startD.setDate(startD.getDate() - 20);
+  const start = getLocalEntryDate(startD);
+  return { start, end };
+}
+
 export function MoodTracker() {
   const supabaseEnabled = useMemo(() => canUseSupabase(), []);
   const [selectedMood, setSelectedMood] = useState<MoodKey | null>(null);
-  const [emotionLevel, setEmotionLevel] = useState(0);
-  const [stressLevel, setStressLevel] = useState(0);
-  const [energyLevel, setEnergyLevel] = useState(0);
+  const [emotionLevel, setEmotionLevel] = useState(3);
+  const [stressLevel, setStressLevel] = useState(3);
+  const [energyLevel, setEnergyLevel] = useState(3);
+  const [note, setNote] = useState("");
   const [entries, setEntries] = useState<MoodEntry[]>([]);
+  const [insightEntries, setInsightEntries] = useState<MoodEntry[]>([]);
+  const [insightRefreshKey, setInsightRefreshKey] = useState(0);
   const [showHistory, setShowHistory] = useState(false);
   const [showInsights, setShowInsights] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
-  const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>("idle");
+  const [autosaveMessage, setAutosaveMessage] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [viewDate, setViewDate] = useState(() => new Date());
   const [selectedDateKey, setSelectedDateKey] = useState(() => toDateKey(new Date()));
+
+  const lastSavedFingerprint = useRef<string | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     async function loadEntries() {
@@ -116,6 +173,32 @@ export function MoodTracker() {
     void loadEntries();
   }, [supabaseEnabled, viewDate]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { start, end } = recentRangeKeys();
+      try {
+        let rows: MoodEntry[];
+        if (supabaseEnabled) {
+          rows = await listMoodEntriesBetween(start, end);
+        } else {
+          rows = readLocalEntries().filter((e) => e.entryDate >= start && e.entryDate <= end);
+        }
+        if (!cancelled) {
+          setInsightEntries(rows);
+        }
+      } catch (error) {
+        console.error("Failed loading insight window", error);
+        if (!cancelled) {
+          setInsightEntries([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [supabaseEnabled, insightRefreshKey]);
+
   const selectedMoodMeta = useMemo(
     () => (selectedMood ? getMoodOption(selectedMood) : undefined),
     [selectedMood]
@@ -133,7 +216,102 @@ export function MoodTracker() {
 
   const calendarCells = useMemo(() => buildCalendarGrid(viewDate), [viewDate]);
   const selectedDayEntries = entriesByDate[selectedDateKey] ?? [];
-  const insights = useMemo(() => generateInsights(entries), [entries]);
+  const insights = useMemo(() => generateInsights(insightEntries), [insightEntries]);
+
+  const performSave = useCallback(
+    async (expectedFingerprint: string) => {
+      if (!selectedMood) {
+        return;
+      }
+      const entryDate = getLocalEntryDate(new Date());
+      const trimmedNote = note.trim().slice(0, NOTE_MAX_LENGTH) || undefined;
+
+      setAutosaveStatus("saving");
+      setAutosaveMessage(null);
+
+      try {
+        if (supabaseEnabled) {
+          const newEntry = await createMoodEntry({
+            entryDate,
+            mood: selectedMood,
+            emotionLevel,
+            stressLevel,
+            energyLevel,
+            note: trimmedNote
+          });
+          setEntries((previous) => {
+            const inMonth =
+              new Date(`${newEntry.entryDate}T00:00:00`).getMonth() === viewDate.getMonth() &&
+              new Date(`${newEntry.entryDate}T00:00:00`).getFullYear() === viewDate.getFullYear();
+            return inMonth ? [newEntry, ...previous] : previous;
+          });
+        } else {
+          const newEntry: MoodEntry = {
+            id: crypto.randomUUID(),
+            createdAt: new Date().toISOString(),
+            entryDate,
+            mood: selectedMood,
+            emotionLevel,
+            stressLevel,
+            energyLevel,
+            source: "manual",
+            note: trimmedNote ?? null
+          };
+          const allLocalEntries = [newEntry, ...readLocalEntries()];
+          persistLocalEntries(allLocalEntries);
+          setEntries((previous) => {
+            const inMonth =
+              new Date(`${newEntry.entryDate}T00:00:00`).getMonth() === viewDate.getMonth() &&
+              new Date(`${newEntry.entryDate}T00:00:00`).getFullYear() === viewDate.getFullYear();
+            return inMonth ? [newEntry, ...previous] : previous;
+          });
+        }
+
+        setSelectedDateKey(entryDate);
+        setInsightRefreshKey((k) => k + 1);
+        lastSavedFingerprint.current = expectedFingerprint;
+        setAutosaveStatus("saved");
+        setAutosaveMessage("Saved to Rediscover Aura.");
+        window.setTimeout(() => {
+          setAutosaveStatus((s) => (s === "saved" ? "idle" : s));
+          setAutosaveMessage(null);
+        }, 2500);
+      } catch (error) {
+        console.error("Failed saving mood", error);
+        setAutosaveStatus("error");
+        setAutosaveMessage("Could not save. Check your connection and try again.");
+        throw error;
+      }
+    },
+    [selectedMood, emotionLevel, stressLevel, energyLevel, note, supabaseEnabled, viewDate]
+  );
+
+  useEffect(() => {
+    if (!selectedMood) {
+      return;
+    }
+    const fingerprint = `${selectedMood}|${emotionLevel}|${stressLevel}|${energyLevel}|${note.trim()}`;
+    if (fingerprint === lastSavedFingerprint.current) {
+      return;
+    }
+
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      void performSave(fingerprint).catch(() => {
+        /* error state already set in performSave */
+      });
+    }, AUTOSAVE_MS);
+
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [selectedMood, emotionLevel, stressLevel, energyLevel, note, performSave]);
 
   function goToToday() {
     const now = new Date();
@@ -150,52 +328,8 @@ export function MoodTracker() {
     setEmotionLevel(moodMeta.defaults.emotion);
     setStressLevel(moodMeta.defaults.stress);
     setEnergyLevel(moodMeta.defaults.energy);
-  }
-
-  async function onSaveMood() {
-    if (!selectedMood) {
-      return;
-    }
-    setIsSaving(true);
-    setSaveError(null);
-    setSaveMessage(null);
-
-    const entryDate = getLocalEntryDate(new Date());
-
-    try {
-      if (supabaseEnabled) {
-        const newEntry = await createMoodEntry({
-          entryDate,
-          mood: selectedMood,
-          emotionLevel,
-          stressLevel,
-          energyLevel
-        });
-        setEntries((previous) => [newEntry, ...previous]);
-      } else {
-        const newEntry: MoodEntry = {
-          id: crypto.randomUUID(),
-          createdAt: new Date().toISOString(),
-          entryDate,
-          mood: selectedMood,
-          emotionLevel,
-          stressLevel,
-          energyLevel,
-          source: "manual"
-        };
-        const allLocalEntries = [newEntry, ...readLocalEntries()];
-        persistLocalEntries(allLocalEntries);
-        setEntries((previous) => [newEntry, ...previous]);
-      }
-
-      setSelectedDateKey(entryDate);
-      setSaveMessage("Mood logged successfully.");
-    } catch (error) {
-      console.error("Failed saving mood", error);
-      setSaveError("Could not save mood log. Please try again.");
-    } finally {
-      setIsSaving(false);
-    }
+    setNote("");
+    lastSavedFingerprint.current = null;
   }
 
   return (
@@ -214,7 +348,8 @@ export function MoodTracker() {
                 How are you feeling today?
               </h1>
               <p className="mt-2 text-sm leading-6 text-aura-muted sm:text-base">
-                Pick a mood and Aura pre-fills your emotional baseline so logging takes just a few seconds.
+                Pick a mood and Rediscover Aura pre-fills a 1–5 baseline for each line so logging stays quick. Your check-in
+                saves automatically after you stop editing for a moment.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -259,42 +394,85 @@ export function MoodTracker() {
             ))}
           </div>
 
-          <div className="space-y-6">
-            <MetricBar label="Emotion" value={emotionLevel} />
-            <MetricBar label="Stress" value={stressLevel} />
-            <MetricBar label="Energy" value={energyLevel} />
-          </div>
+          {selectedMood ? (
+            <div className="space-y-8">
+              <div className="space-y-6">
+                <Scale1to5
+                  label="Emotion"
+                  lowLabel="Low"
+                  highLabel="High"
+                  value={emotionLevel}
+                  onChange={setEmotionLevel}
+                />
+                <Scale1to5
+                  label="Stress"
+                  lowLabel="Calm"
+                  highLabel="Intense"
+                  value={stressLevel}
+                  onChange={setStressLevel}
+                />
+                <Scale1to5
+                  label="Energy"
+                  lowLabel="Low"
+                  highLabel="High"
+                  value={energyLevel}
+                  onChange={setEnergyLevel}
+                />
+              </div>
 
-          <div className="mt-9 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-sm text-aura-muted">
+              <div>
+                <label htmlFor="mood-note" className="text-sm font-medium text-aura-text">
+                  Add a brief note{" "}
+                  <span className="font-normal text-aura-muted">(optional) — what is behind this feeling today?</span>
+                </label>
+                <textarea
+                  id="mood-note"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value.slice(0, NOTE_MAX_LENGTH))}
+                  rows={3}
+                  maxLength={NOTE_MAX_LENGTH}
+                  placeholder="e.g. Deadlines piling up at work…"
+                  className="mt-2 w-full resize-y rounded-xl border border-aura-border bg-white px-3 py-2 text-sm text-aura-text placeholder:text-aura-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+                />
+                <p className="mt-1 text-xs text-aura-muted tabular-nums">
+                  {note.length} / {NOTE_MAX_LENGTH}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="rounded-xl border border-dashed border-aura-border bg-aura-canvas/80 px-4 py-6 text-center text-sm text-aura-muted">
+              Select a mood above to set your 1–5 levels and optional note. Rediscover Aura will save your check-in
+              automatically.
+            </p>
+          )}
+
+          <div className="mt-8 flex min-h-11 flex-col gap-2 text-sm text-aura-muted sm:flex-row sm:items-center sm:justify-between">
+            <div>
               {selectedMoodMeta ? (
                 <span>
                   Selected mood: <span className="font-semibold text-aura-text">{selectedMoodMeta.label}</span>
                 </span>
               ) : (
-                <span>Select a mood to prepare your log entry.</span>
+                <span>Select a mood to begin your check-in.</span>
               )}
-              {saveMessage ? <p className="mt-1 text-sm text-emerald-700">{saveMessage}</p> : null}
-              {saveError ? <p className="mt-1 text-sm text-red-700">{saveError}</p> : null}
             </div>
-              <button
-                type="button"
-                disabled={!selectedMood || isSaving}
-                onClick={onSaveMood}
-              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-aura-text px-5 py-3 text-sm font-medium text-white transition hover:bg-[#0f172a] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
-            >
-              {isSaving ? (
+            <div className="flex items-center gap-2 text-aura-text" aria-live="polite">
+              {autosaveStatus === "saving" ? (
                 <>
-                  <Loader2 size={16} className="animate-spin" />
-                  Logging...
+                  <Loader2 size={16} className="animate-spin text-violet-600" aria-hidden />
+                  <span className="text-sm">Saving…</span>
                 </>
-              ) : (
-                <>
-                  <Save size={16} />
-                  Save Mood Log
-                </>
-              )}
-            </button>
+              ) : null}
+              {autosaveStatus === "saved" && autosaveMessage ? (
+                <span className="text-sm font-medium text-emerald-700">{autosaveMessage}</span>
+              ) : null}
+              {autosaveStatus === "error" && autosaveMessage ? (
+                <span className="text-sm font-medium text-red-700">{autosaveMessage}</span>
+              ) : null}
+              {selectedMood && autosaveStatus === "idle" ? (
+                <span className="text-xs text-aura-muted sm:text-sm">Edits save automatically.</span>
+              ) : null}
+            </div>
           </div>
         </article>
 
@@ -305,7 +483,9 @@ export function MoodTracker() {
                 <Sparkles size={14} /> Insights
               </p>
               <h2 className="mt-3 text-2xl font-semibold tracking-tight text-aura-text">Your trend snapshot</h2>
-              <p className="mt-1 text-sm text-aura-muted">Simple guidance from your latest check-ins.</p>
+              <p className="mt-1 text-sm text-aura-muted">
+                Based on your check-ins over the past {INSIGHT_WINDOW_DAYS} days in Rediscover Aura.
+              </p>
             </div>
           </div>
           <ul className="mt-6 space-y-3">
@@ -425,15 +605,22 @@ export function MoodTracker() {
                     const moodMeta = getMoodOption(entry.mood);
                     return (
                       <article key={entry.id} className="rounded-xl border border-aura-border bg-white p-3">
-                        <div className="mb-2 flex items-center justify-between">
+                        <div className="mb-2 flex items-center justify-between gap-2">
                           <p className="text-sm font-semibold text-aura-text">
                             {moodMeta?.emoji} {moodMeta?.label}
                           </p>
-                          <p className="text-xs text-aura-muted">{getLocalMonthDayLabel(entry.createdAt)}</p>
+                          <p className="text-xs text-aura-muted whitespace-nowrap">{getLocalMonthDayLabel(entry.createdAt)}</p>
                         </div>
                         <p className="text-xs text-aura-muted">
-                          Emotion {entry.emotionLevel} · Stress {entry.stressLevel} · Energy {entry.energyLevel}
+                          Emotion {normalizeLevel(entry.emotionLevel)} · Stress {normalizeLevel(entry.stressLevel)} · Energy{" "}
+                          {normalizeLevel(entry.energyLevel)}
+                          <span className="text-aura-muted"> (1–5)</span>
                         </p>
+                        {entry.note ? (
+                          <p className="mt-2 border-t border-aura-border pt-2 text-sm leading-relaxed text-aura-text">
+                            {entry.note}
+                          </p>
+                        ) : null}
                       </article>
                     );
                   })
@@ -462,6 +649,9 @@ export function MoodTracker() {
                 <X size={18} aria-hidden />
               </button>
             </div>
+            <p className="mb-4 text-sm text-aura-muted">
+              Framed from your last {INSIGHT_WINDOW_DAYS} days of check-ins in Rediscover Aura.
+            </p>
             <ul className="space-y-3">
               {insights.map((insight) => (
                 <li key={insight} className="rounded-xl border border-aura-border bg-aura-canvas p-3 text-sm leading-6 text-aura-text">

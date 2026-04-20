@@ -5,9 +5,9 @@ create table if not exists public.mood_entries (
   created_at timestamptz not null default now(),
   entry_date date not null,
   mood text not null check (mood in ('happy', 'neutral', 'sad', 'angry', 'anxious')),
-  emotion_level int not null check (emotion_level >= 0 and emotion_level <= 100),
-  stress_level int not null check (stress_level >= 0 and stress_level <= 100),
-  energy_level int not null check (energy_level >= 0 and energy_level <= 100),
+  emotion_level int not null check (emotion_level >= 1 and emotion_level <= 5),
+  stress_level int not null check (stress_level >= 1 and stress_level <= 5),
+  energy_level int not null check (energy_level >= 1 and energy_level <= 5),
   note text,
   source text not null default 'manual'
 );

@@ -16,13 +16,14 @@ export const MOOD_OPTIONS: Array<{
   key: MoodKey;
   label: string;
   emoji: string;
+  /** 1 = low / calm, 5 = high / intense — per dimension. */
   defaults: { emotion: number; stress: number; energy: number };
 }> = [
-  { key: "happy", label: "Happy", emoji: "😊", defaults: { emotion: 90, stress: 20, energy: 78 } },
-  { key: "neutral", label: "Neutral", emoji: "🙂", defaults: { emotion: 55, stress: 40, energy: 52 } },
-  { key: "sad", label: "Sad", emoji: "😔", defaults: { emotion: 25, stress: 55, energy: 28 } },
-  { key: "angry", label: "Angry", emoji: "😠", defaults: { emotion: 32, stress: 85, energy: 66 } },
-  { key: "anxious", label: "Anxious", emoji: "😰", defaults: { emotion: 36, stress: 88, energy: 44 } }
+  { key: "happy", label: "Happy", emoji: "😊", defaults: { emotion: 5, stress: 1, energy: 4 } },
+  { key: "neutral", label: "Neutral", emoji: "🙂", defaults: { emotion: 3, stress: 3, energy: 3 } },
+  { key: "sad", label: "Sad", emoji: "😔", defaults: { emotion: 1, stress: 3, energy: 2 } },
+  { key: "angry", label: "Angry", emoji: "😠", defaults: { emotion: 2, stress: 5, energy: 4 } },
+  { key: "anxious", label: "Anxious", emoji: "😰", defaults: { emotion: 2, stress: 5, energy: 3 } }
 ];
 
 export function getMoodOption(moodKey: MoodKey) {

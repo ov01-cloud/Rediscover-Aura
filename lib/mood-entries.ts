@@ -1,3 +1,4 @@
+import { assertLevel1to5, normalizeLevel } from "@/lib/level-scale";
 import { MoodEntry, MoodKey } from "@/lib/mood-config";
 import { getSupabaseClient } from "@/lib/supabase-client";
 
@@ -30,24 +31,18 @@ function toDomain(row: MoodEntryRow): MoodEntry {
     createdAt: row.created_at,
     entryDate: row.entry_date,
     mood: row.mood,
-    emotionLevel: row.emotion_level,
-    stressLevel: row.stress_level,
-    energyLevel: row.energy_level,
+    emotionLevel: normalizeLevel(row.emotion_level),
+    stressLevel: normalizeLevel(row.stress_level),
+    energyLevel: normalizeLevel(row.energy_level),
     source: row.source,
     note: row.note
   };
 }
 
-function assertValidLevel(level: number, label: string) {
-  if (!Number.isFinite(level) || level < 0 || level > 100) {
-    throw new Error(`${label} must be between 0 and 100.`);
-  }
-}
-
 export async function createMoodEntry(input: CreateMoodEntryInput): Promise<MoodEntry> {
-  assertValidLevel(input.emotionLevel, "Emotion");
-  assertValidLevel(input.stressLevel, "Stress");
-  assertValidLevel(input.energyLevel, "Energy");
+  assertLevel1to5(input.emotionLevel, "Emotion");
+  assertLevel1to5(input.stressLevel, "Stress");
+  assertLevel1to5(input.energyLevel, "Energy");
 
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
@@ -81,6 +76,22 @@ export async function listMoodEntriesByMonth(year: number, monthOneIndexed: numb
     .select("*")
     .gte("entry_date", monthStart)
     .lte("entry_date", monthEnd)
+    .order("created_at", { ascending: false })
+    .returns<MoodEntryRow[]>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  return data.map(toDomain);
+}
+
+export async function listMoodEntriesBetween(startDate: string, endDate: string): Promise<MoodEntry[]> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from(TABLE_NAME)
+    .select("*")
+    .gte("entry_date", startDate)
+    .lte("entry_date", endDate)
     .order("created_at", { ascending: false })
     .returns<MoodEntryRow[]>();
 

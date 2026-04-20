@@ -34,18 +34,29 @@ For MVP, the product is single-user and focused on one primary logging experienc
   - Emotion
   - Stress
   - Energy
-- **Value Range:** 0 to 100 inclusive.
+- **Value Range:** 1 to 5 inclusive per dimension (linear scale, consumer-friendly labels; no percentage UI).
+
+### 3.2.1 Optional context note
+
+- Users may add a **short optional text** explaining what is behind their feeling (e.g. stress source).
+- Notes appear with the entry in **calendar day detail**.
+
+### 3.2.2 Autosave
+
+- Check-ins **save automatically** after the user pauses editing (debounced), with clear “Saving…” / “Saved” feedback.
 
 ### 3.3 History & Calendar
 
 - **UI Element:** Calendar icon.
 - **Functionality:** Opens a monthly history view with day-level markers for logged entries.
-- **Behavior:** Selecting a day shows that day’s mood entries and recorded levels.
+- **Behavior:** Selecting a day shows that day’s mood entries, recorded levels, and any note text.
 
 ### 3.4 Predictive Insights
 
 - **UI Element:** Lightbulb icon.
 - **Functionality:** Opens insights panel with deterministic, fictitious insights derived from logged behavior patterns.
+- **Time framing:** Copy references a **specific rolling window** (e.g. “Over the past 5 days”), not vague “recent.”
+- **Platform hooks:** Copy may softly reference future Rediscover Aura modules (journaling, experiences, retreats) without implying those features are live.
 - **Data Source:** Dummy/rule-based logic for MVP (no ML).
 
 ### 3.5 MVP Scope Boundaries
@@ -70,28 +81,28 @@ For MVP, the product is single-user and focused on one primary logging experienc
   - Header with "How are you feeling today?"
   - Lightbulb (insights) and Calendar (history) quick actions
   - Horizontal emoji mood selector
-  - Emotion/Stress/Energy linear scales
-  - Save/Log action with clear enabled/disabled states
+  - Emotion/Stress/Energy linear 1–5 scales
+  - Autosave with visible save status (no required manual save for MVP)
 - **Responsiveness:** Full functionality on mobile and desktop with no feature loss.
 - **Accessibility Baseline:** Keyboard-accessible controls, visible focus states, semantic labels, clear loading/empty/error states.
 
 ## 4.1 Feature Acceptance Criteria
 
 ### Mood Selection
-- Selecting a mood visibly updates selected state and auto-populates all three levels.
-- Save action is disabled until a mood is selected.
+- Selecting a mood visibly updates selected state and auto-populates all three levels (1–5).
+- Scales and optional note are available only after a mood is selected.
 
 ### Logging & Persistence
-- Saving creates a new entry in Supabase.
+- Autosave creates a new entry in Supabase (or local fallback) after edits settle.
 - Reloading the app preserves prior entries from Supabase.
 - Failed save/load states show clear user feedback and retry path.
 
 ### History
 - Calendar view renders current month and marks dates with entries.
-- User can select a date and view all logs for that day.
+- User can select a date and view all logs for that day, including optional notes.
 
 ### Insights
-- Insights panel displays at least 3 deterministic insight messages.
+- Insights panel displays at least 3 deterministic insight messages tied to the past 5 days of data when available.
 - Insights remain readable and visually consistent on mobile.
 
 ## 4.2 UX Quality Bar (Ship Criteria)
@@ -130,9 +141,9 @@ For MVP, the product is single-user and focused on one primary logging experienc
 - `created_at` (timestamp with timezone, server-generated)
 - `entry_date` (date, user-local derived date for calendar grouping)
 - `mood` (enum: happy | neutral | sad | angry | anxious)
-- `emotion_level` (int, 0..100)
-- `stress_level` (int, 0..100)
-- `energy_level` (int, 0..100)
+- `emotion_level` (int, 1..5)
+- `stress_level` (int, 1..5)
+- `energy_level` (int, 1..5)
 - `note` (optional text, nullable)
 - `source` (text, default: manual)
 
@@ -140,7 +151,7 @@ For MVP, the product is single-user and focused on one primary logging experienc
 
 - `mood`, `emotion_level`, `stress_level`, `energy_level`, and `entry_date` are required.
 - Timestamp remains immutable once inserted.
-- Levels outside 0..100 are rejected.
+- Levels outside 1..5 are rejected.
 
 ## 7. Future Considerations (Post-MVP)
 

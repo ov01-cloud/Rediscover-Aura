@@ -73,7 +73,7 @@ This pass is considered done only when all conditions are true:
 - `created_at` timestamptz
 - `entry_date` date
 - `mood` text enum-like value (`happy|neutral|sad|angry|anxious`)
-- `emotion_level`, `stress_level`, `energy_level` integers in 0..100
+- `emotion_level`, `stress_level`, `energy_level` integers in 1..5
 - `note` nullable text
 - `source` text (`manual`)
 
