@@ -1,9 +1,9 @@
 {
   "plugins": {
-    "supabase": {
+    "vercel": {
       "enabled": true
     },
-    "vercel": {
+    "supabase": {
       "enabled": true
     }
   }

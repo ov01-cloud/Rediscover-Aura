@@ -1,9 +1,12 @@
 export type MoodKey = "happy" | "neutral" | "sad" | "angry" | "anxious";
 
+export type OwnerTag = "default" | "test_user_a" | "test_user_b";
+
 export type MoodEntry = {
   id: string;
   createdAt: string;
   entryDate: string;
+  ownerTag: OwnerTag;
   mood: MoodKey;
   emotionLevel: number;
   stressLevel: number;
