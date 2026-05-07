@@ -3,20 +3,19 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Lightbulb, Loader2, Sparkles, X } from "lucide-react";
-import { INSIGHT_WINDOW_DAYS, generateInsights } from "@/lib/insights";
+import { generateInsightCards, INSIGHT_WINDOW_DAYS } from "@/lib/insights";
 import {
   createMoodEntry,
-  findCheckInForDate,
   listMoodEntriesBetween,
   listMoodEntriesByMonth,
   updateMoodEntry
 } from "@/lib/mood-entries";
 import {
-  findLocalCheckInForDate,
   listLocalMoodEntriesBetween,
-  readAllMoodEntriesFromLocal,
-  upsertMoodEntryLocal
+  putMoodEntryLocal,
+  readAllMoodEntriesFromLocal
 } from "@/lib/local-mood-store";
+import { logSuggestionEvent } from "@/lib/suggestion-events";
 import { getLocalEntryDate, getMoodOption, MoodEntry, MoodKey, MOOD_OPTIONS, type OwnerTag } from "@/lib/mood-config";
 import { normalizeLevel } from "@/lib/level-scale";
 import { isDataReviewEnabled, OWNER_OPTIONS, getStoredOwnerTag, setStoredOwnerTag } from "@/lib/profile";
@@ -39,6 +38,16 @@ function buildFingerprint(
 
 function formatSavedTime(d: Date) {
   return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function formatEntryDateTime(iso: string) {
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
 }
 
 function Scale1to5({
@@ -89,11 +98,6 @@ function Scale1to5({
       </div>
     </div>
   );
-}
-
-function getLocalMonthDayLabel(dateIso: string) {
-  const date = new Date(dateIso);
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function getMonthLabel(monthDate: Date) {
@@ -155,11 +159,12 @@ export function MoodTracker() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [viewDate, setViewDate] = useState(() => new Date());
   const [selectedDateKey, setSelectedDateKey] = useState(() => toDateKey(new Date()));
-  const [hydrating, setHydrating] = useState(true);
+  /** When set, autosave updates this row; when null, the next save creates a new check-in. */
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
 
   const lastSavedFingerprint = useRef<string | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const todayCheckInIdRef = useRef<string | null>(null);
+  const previousMoodKeyRef = useRef<MoodKey | null>(null);
 
   useEffect(() => {
     setOwnerTag(getStoredOwnerTag());
@@ -172,85 +177,23 @@ export function MoodTracker() {
     if (!ownerReady) {
       return;
     }
-    let cancelled = false;
-    (async () => {
-      setHydrating(true);
-      const today = getLocalEntryDate(new Date());
-      try {
-        if (supabaseEnabled) {
-          const row = await findCheckInForDate(ownerTag, today);
-          if (cancelled) {
-            return;
-          }
-          if (row) {
-            todayCheckInIdRef.current = row.id;
-            setSelectedMood(row.mood);
-            setEmotionLevel(row.emotionLevel);
-            setStressLevel(row.stressLevel);
-            setEnergyLevel(row.energyLevel);
-            setNote(row.note ?? "");
-            setCommittedNote(row.note ?? "");
-            const fp = buildFingerprint(
-              row.mood,
-              row.emotionLevel,
-              row.stressLevel,
-              row.energyLevel,
-              row.note ?? ""
-            );
-            lastSavedFingerprint.current = fp;
-          } else {
-            todayCheckInIdRef.current = null;
-            setSelectedMood(null);
-            setEmotionLevel(3);
-            setStressLevel(3);
-            setEnergyLevel(3);
-            setNote("");
-            setCommittedNote("");
-            lastSavedFingerprint.current = null;
-          }
-        } else {
-          const row = findLocalCheckInForDate(ownerTag, today);
-          if (cancelled) {
-            return;
-          }
-          if (row) {
-            todayCheckInIdRef.current = row.id;
-            setSelectedMood(row.mood);
-            setEmotionLevel(row.emotionLevel);
-            setStressLevel(row.stressLevel);
-            setEnergyLevel(row.energyLevel);
-            setNote(row.note ?? "");
-            setCommittedNote(row.note ?? "");
-            lastSavedFingerprint.current = buildFingerprint(
-              row.mood,
-              row.emotionLevel,
-              row.stressLevel,
-              row.energyLevel,
-              row.note ?? ""
-            );
-          } else {
-            todayCheckInIdRef.current = null;
-            setSelectedMood(null);
-            setEmotionLevel(3);
-            setStressLevel(3);
-            setEnergyLevel(3);
-            setNote("");
-            setCommittedNote("");
-            lastSavedFingerprint.current = null;
-          }
-        }
-      } catch (e) {
-        console.error("Hydrate check-in", e);
-      } finally {
-        if (!cancelled) {
-          setHydrating(false);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [ownerTag, supabaseEnabled, ownerReady]);
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    previousMoodKeyRef.current = null;
+    setActiveDraftId(null);
+    setSelectedMood(null);
+    setEmotionLevel(3);
+    setStressLevel(3);
+    setEnergyLevel(3);
+    setNote("");
+    setCommittedNote("");
+    lastSavedFingerprint.current = null;
+    setAutosaveStatus("idle");
+    setAutosaveMessage(null);
+    setLastSavedAt(null);
+  }, [ownerTag, ownerReady]);
 
   useEffect(() => {
     if (!ownerReady) {
@@ -332,8 +275,12 @@ export function MoodTracker() {
   }, [entries]);
 
   const calendarCells = useMemo(() => buildCalendarGrid(viewDate), [viewDate]);
-  const selectedDayEntries = entriesByDate[selectedDateKey] ?? [];
-  const insights = useMemo(() => generateInsights(insightEntries), [insightEntries]);
+  const selectedDayEntries = useMemo(() => {
+    const list = entriesByDate[selectedDateKey] ?? [];
+    return [...list].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [entriesByDate, selectedDateKey]);
+
+  const insightCards = useMemo(() => generateInsightCards(insightEntries), [insightEntries]);
 
   const performUpsert = useCallback(
     async (expectedFingerprint: string) => {
@@ -356,16 +303,14 @@ export function MoodTracker() {
 
       try {
         if (supabaseEnabled) {
-          const existingId = todayCheckInIdRef.current;
-          if (existingId) {
-            const updated = await updateMoodEntry(existingId, {
+          if (activeDraftId) {
+            const updated = await updateMoodEntry(activeDraftId, {
               mood: payload.mood,
               emotionLevel: payload.emotionLevel,
               stressLevel: payload.stressLevel,
               energyLevel: payload.energyLevel,
               note: payload.note
             });
-            todayCheckInIdRef.current = updated.id;
             setEntries((previous) => {
               const has = previous.some((r) => r.id === updated.id);
               if (has) {
@@ -379,7 +324,7 @@ export function MoodTracker() {
               ownerTag,
               ...payload
             });
-            todayCheckInIdRef.current = created.id;
+            setActiveDraftId(created.id);
             setEntries((previous) => {
               const inMonth =
                 new Date(`${created.entryDate}T00:00:00`).getMonth() === viewDate.getMonth() &&
@@ -388,31 +333,66 @@ export function MoodTracker() {
             });
           }
         } else {
-          const existing = findLocalCheckInForDate(ownerTag, today);
-          const newRow: MoodEntry = {
-            id: existing?.id ?? todayCheckInIdRef.current ?? crypto.randomUUID(),
-            createdAt: existing?.createdAt ?? new Date().toISOString(),
-            entryDate: today,
-            ownerTag,
-            mood: selectedMood,
-            emotionLevel,
-            stressLevel,
-            energyLevel,
-            source: "manual",
-            note: trimmedNote ?? null
-          };
-          todayCheckInIdRef.current = newRow.id;
-          upsertMoodEntryLocal(newRow);
-          setEntries((previous) => {
-            const inMonth =
-              new Date(`${newRow.entryDate}T00:00:00`).getMonth() === viewDate.getMonth() &&
-              new Date(`${newRow.entryDate}T00:00:00`).getFullYear() === viewDate.getFullYear();
-            if (!inMonth) {
-              return previous;
-            }
-            const noDup = previous.filter((r) => r.id !== newRow.id);
-            return [newRow, ...noDup];
-          });
+          if (activeDraftId) {
+            const prior = readAllMoodEntriesFromLocal().find((e) => e.id === activeDraftId);
+            const row: MoodEntry = prior
+              ? {
+                  ...prior,
+                  mood: selectedMood,
+                  emotionLevel,
+                  stressLevel,
+                  energyLevel,
+                  note: trimmedNote ?? null
+                }
+              : {
+                  id: crypto.randomUUID(),
+                  createdAt: new Date().toISOString(),
+                  entryDate: today,
+                  ownerTag,
+                  mood: selectedMood,
+                  emotionLevel,
+                  stressLevel,
+                  energyLevel,
+                  source: "manual",
+                  note: trimmedNote ?? null
+                };
+            putMoodEntryLocal(row);
+            setActiveDraftId(row.id);
+            setEntries((previous) => {
+              const inMonth =
+                new Date(`${row.entryDate}T00:00:00`).getMonth() === viewDate.getMonth() &&
+                new Date(`${row.entryDate}T00:00:00`).getFullYear() === viewDate.getFullYear();
+              if (!inMonth) {
+                return previous;
+              }
+              const has = previous.some((r) => r.id === row.id);
+              if (has) {
+                return previous.map((r) => (r.id === row.id ? row : r));
+              }
+              return [row, ...previous];
+            });
+          } else {
+            const newRow: MoodEntry = {
+              id: crypto.randomUUID(),
+              createdAt: new Date().toISOString(),
+              entryDate: today,
+              ownerTag,
+              mood: selectedMood,
+              emotionLevel,
+              stressLevel,
+              energyLevel,
+              source: "manual",
+              note: trimmedNote ?? null
+            };
+            putMoodEntryLocal(newRow);
+            setActiveDraftId(newRow.id);
+            setEntries((previous) => {
+              const inMonth =
+                new Date(`${newRow.entryDate}T00:00:00`).getMonth() === viewDate.getMonth() &&
+                new Date(`${newRow.entryDate}T00:00:00`).getFullYear() === viewDate.getFullYear();
+              return inMonth ? [newRow, ...previous] : previous;
+            });
+          }
         }
 
         setCommittedNote(note.trim());
@@ -434,7 +414,7 @@ export function MoodTracker() {
         throw error;
       }
     },
-    [selectedMood, emotionLevel, stressLevel, energyLevel, note, supabaseEnabled, viewDate, ownerTag]
+    [activeDraftId, selectedMood, emotionLevel, stressLevel, energyLevel, note, supabaseEnabled, viewDate, ownerTag]
   );
 
   const saveNow = useCallback(() => {
@@ -452,7 +432,7 @@ export function MoodTracker() {
   }, [selectedMood, emotionLevel, stressLevel, energyLevel, note, performUpsert]);
 
   useEffect(() => {
-    if (!selectedMood || hydrating) {
+    if (!selectedMood || !ownerReady) {
       return;
     }
     const fp = buildFingerprint(selectedMood, emotionLevel, stressLevel, energyLevel, note);
@@ -476,7 +456,7 @@ export function MoodTracker() {
         saveTimerRef.current = null;
       }
     };
-  }, [selectedMood, emotionLevel, stressLevel, energyLevel, note, performUpsert, hydrating]);
+  }, [selectedMood, emotionLevel, stressLevel, energyLevel, note, performUpsert, ownerReady]);
 
   function goToToday() {
     const now = new Date();
@@ -489,6 +469,10 @@ export function MoodTracker() {
     if (!moodMeta) {
       return;
     }
+    if (previousMoodKeyRef.current !== mood) {
+      setActiveDraftId(null);
+    }
+    previousMoodKeyRef.current = mood;
     setSelectedMood(mood);
     setEmotionLevel(moodMeta.defaults.emotion);
     setStressLevel(moodMeta.defaults.stress);
@@ -498,10 +482,45 @@ export function MoodTracker() {
     lastSavedFingerprint.current = null;
   }
 
+  function startNewCheckIn() {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    setActiveDraftId(null);
+    previousMoodKeyRef.current = null;
+    setSelectedMood(null);
+    setEmotionLevel(3);
+    setStressLevel(3);
+    setEnergyLevel(3);
+    setNote("");
+    setCommittedNote("");
+    lastSavedFingerprint.current = null;
+    setAutosaveStatus("idle");
+    setAutosaveMessage(null);
+  }
+
   function onChangeOwnerTag(next: OwnerTag) {
     setOwnerTag(next);
     setStoredOwnerTag(next);
   }
+
+  useEffect(() => {
+    if (!showInsights || !ownerReady) {
+      return;
+    }
+    const latestMoodId = insightEntries[0]?.id ?? null;
+    for (const c of insightCards) {
+      if (c.trackingKey) {
+        void logSuggestionEvent({
+          ownerTag,
+          moodEntryId: latestMoodId,
+          suggestionKey: c.trackingKey,
+          event: "shown"
+        });
+      }
+    }
+  }, [showInsights, ownerReady, ownerTag, insightCards, insightEntries]);
 
   return (
     <main className="min-h-screen bg-[radial-gradient(120%_120%_at_0%_0%,#f2ebff_0%,#f8f7f4_50%,#f9f8f5_100%)] px-4 py-8 sm:px-6 lg:px-8">
@@ -519,7 +538,8 @@ export function MoodTracker() {
                 How are you feeling today?
               </h1>
               <p className="mt-2 text-sm leading-6 text-aura-muted sm:text-base">
-                Pick a mood and Rediscover Aura pre-fills a 1–5 baseline for each line so logging stays quick.
+                Pick a mood and Rediscover Aura pre-fills a 1–5 baseline for each line so logging stays quick. You can log
+                again later the same day—each check-in is saved with its own time.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -544,10 +564,6 @@ export function MoodTracker() {
               </button>
             </div>
           </header>
-
-          {hydrating ? (
-            <p className="mb-4 text-sm text-aura-muted">Loading today&apos;s check-in…</p>
-          ) : null}
 
           <div className="mb-8 grid grid-cols-2 gap-2.5 sm:grid-cols-5 sm:gap-3">
             {MOOD_OPTIONS.map((mood) => (
@@ -640,6 +656,22 @@ export function MoodTracker() {
             </p>
           )}
 
+          {activeDraftId ? (
+            <div className="mt-6 rounded-xl border border-violet-200/80 bg-violet-50/50 p-4">
+              <p className="text-sm font-medium text-aura-text">Log a different moment today?</p>
+              <p className="mt-1 text-xs text-aura-muted">
+                Your current check-in stays saved. Start a fresh one for another mood or note.
+              </p>
+              <button
+                type="button"
+                onClick={startNewCheckIn}
+                className="mt-3 inline-flex min-h-10 items-center justify-center rounded-lg border border-violet-300 bg-white px-4 py-2 text-sm font-medium text-violet-800 transition hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+              >
+                Add another check-in today
+              </button>
+            </div>
+          ) : null}
+
           <div className="mt-8 flex min-h-11 flex-col gap-2 text-sm text-aura-muted sm:flex-row sm:items-center sm:justify-between">
             <div>
               {selectedMoodMeta ? (
@@ -713,9 +745,9 @@ export function MoodTracker() {
             </div>
           </div>
           <ul className="mt-6 space-y-3">
-            {insights.map((insight) => (
-              <li key={insight} className="rounded-2xl border border-aura-border bg-aura-canvas px-4 py-3 text-sm leading-6 text-aura-text">
-                {insight}
+            {insightCards.map((card) => (
+              <li key={card.id} className="rounded-2xl border border-aura-border bg-aura-canvas px-4 py-3 text-sm leading-6 text-aura-text">
+                {card.text}
               </li>
             ))}
           </ul>
@@ -833,7 +865,7 @@ export function MoodTracker() {
                           <p className="text-sm font-semibold text-aura-text">
                             {moodMeta?.emoji} {moodMeta?.label}
                           </p>
-                          <p className="text-xs text-aura-muted whitespace-nowrap">{getLocalMonthDayLabel(entry.createdAt)}</p>
+                          <p className="text-xs text-aura-muted whitespace-nowrap">{formatEntryDateTime(entry.createdAt)}</p>
                         </div>
                         <p className="text-xs text-aura-muted">
                           Emotion {normalizeLevel(entry.emotionLevel)} · Stress {normalizeLevel(entry.stressLevel)} · Energy{" "}
@@ -877,9 +909,25 @@ export function MoodTracker() {
               Framed from your last {INSIGHT_WINDOW_DAYS} days of check-ins in Rediscover Aura.
             </p>
             <ul className="space-y-3">
-              {insights.map((insight) => (
-                <li key={insight} className="rounded-xl border border-aura-border bg-aura-canvas p-3 text-sm leading-6 text-aura-text">
-                  {insight}
+              {insightCards.map((card) => (
+                <li key={card.id} className="rounded-xl border border-aura-border bg-aura-canvas p-3 text-sm leading-6 text-aura-text">
+                  <p>{card.text}</p>
+                  {card.trackingKey ? (
+                    <button
+                      type="button"
+                      className="mt-3 text-sm font-medium text-violet-700 underline decoration-violet-300 underline-offset-2 hover:text-violet-900"
+                      onClick={() => {
+                        void logSuggestionEvent({
+                          ownerTag,
+                          moodEntryId: insightEntries[0]?.id ?? null,
+                          suggestionKey: card.trackingKey!,
+                          event: "acted"
+                        });
+                      }}
+                    >
+                      Log that I tried this suggestion
+                    </button>
+                  ) : null}
                 </li>
               ))}
             </ul>

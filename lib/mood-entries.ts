@@ -108,29 +108,6 @@ export async function updateMoodEntry(id: string, input: UpdateMoodEntryInput): 
   return toDomain(data);
 }
 
-export async function findCheckInForDate(
-  ownerTag: OwnerTag,
-  entryDate: string
-): Promise<MoodEntry | null> {
-  const supabase = getSupabaseClient();
-  const { data, error } = await supabase
-    .from(TABLE_NAME)
-    .select("*")
-    .eq("owner_tag", ownerTag)
-    .eq("entry_date", entryDate)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .returns<MoodEntryRow[]>();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-  if (!data || data.length === 0) {
-    return null;
-  }
-  return toDomain(data[0]);
-}
-
 export async function listMoodEntriesByMonth(
   ownerTag: OwnerTag,
   year: number,

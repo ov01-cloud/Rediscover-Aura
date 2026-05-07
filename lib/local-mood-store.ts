@@ -36,19 +36,17 @@ function persistAll(entries: MoodEntry[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
 }
 
-export function findLocalCheckInForDate(owner: OwnerTag, entryDate: string): MoodEntry | null {
-  const list = readMoodEntriesForOwner(owner)
-    .filter((e) => e.entryDate === entryDate)
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  return list[0] ?? null;
-}
-
-export function upsertMoodEntryLocal(row: MoodEntry) {
+/** Insert new or replace existing row by id (supports multiple logs per day). */
+export function putMoodEntryLocal(row: MoodEntry) {
   const all = readAllMoodEntriesFromLocal();
-  const filtered = all.filter(
-    (e) => !(e.entryDate === row.entryDate && e.ownerTag === row.ownerTag)
-  );
-  persistAll([row, ...filtered]);
+  const idx = all.findIndex((e) => e.id === row.id);
+  if (idx === -1) {
+    persistAll([row, ...all]);
+    return;
+  }
+  const next = [...all];
+  next[idx] = row;
+  persistAll(next);
 }
 
 export function listLocalMoodEntriesByMonth(

@@ -18,24 +18,12 @@ begin
   end if;
 end $$;
 
--- 3) Deduplicate: keep the newest row per (owner_tag, entry_date)
-with ranked as (
-  select
-    id,
-    row_number() over (
-      partition by owner_tag, entry_date
-      order by created_at desc, id desc
-    ) as rn
-  from public.mood_entries
-)
-delete from public.mood_entries m
-using ranked r
-where m.id = r.id
-  and r.rn > 1;
+-- 3) Multiple check-ins per calendar day are allowed. Drop legacy unique index if it exists.
+drop index if exists public.mood_entries_owner_date_uniq;
 
--- 4) One check-in per profile per day
-create unique index if not exists mood_entries_owner_date_uniq
-  on public.mood_entries (owner_tag, entry_date);
+-- 4) Non-unique index for history / insights queries
+create index if not exists mood_entries_owner_date_created_idx
+  on public.mood_entries (owner_tag, entry_date desc, created_at desc);
 
 -- 5) RLS: allow client updates (same anon pattern as select/insert)
 drop policy if exists "mood_entries_update" on public.mood_entries;
